@@ -158,7 +158,7 @@ textarea:focus{outline:1px solid var(--acid);}
   <div class="panel">
     <h3>Controls</h3>
     <p><b>Phone:</b> touch anywhere on the left half to raise the stick — it moves and aims at the same time,
-    Contra-style 8-way. Hold down + no sideways input to crouch. Right side: FIRE and JUMP.
+    Contra-style 8-way. Hold down with no sideways input to go prone — you fire straight ahead and most incoming shots pass over you. Right side: FIRE and JUMP.
     Auto-fire is on by default; toggle it above the jump button.</p>
     <p><b>Keyboard:</b> A/D move · W/S aim up &amp; crouch · K or Space jump · J or Z fire.</p>
     <p><b>Gamepad:</b> left stick aims and moves · A jump · X or right trigger fire.</p>
@@ -636,7 +636,7 @@ function nearestPlayer(x,y){
 /* --- projectiles --- */
 function firePlayer(p){
   const w=WEP[p.wep];
-  const ox=p.x+p.ax*.9, oy=p.y+(p.crouch?.75:1.72)+p.ay*.55;
+  const ox=p.x+p.ax*(p.crouch?1.15:.9), oy=p.y+(p.crouch?.58:1.72)+p.ay*.55;
   const base=Math.atan2(p.ay,p.ax);
   for(let i=0;i<w.n;i++){
     const off=w.n>1?(i-(w.n-1)/2)*(w.spread/(w.n-1))*2:(Math.random()-.5)*w.spread;
@@ -861,7 +861,8 @@ function updateBullets(dt){
     if(!kill&&solidAt(b.x,b.y)) kill=true;
     if(!kill) for(const p of W.players){
       if(p.dead||p.out) continue;
-      if(Math.abs(b.x-p.x)<.75 && Math.abs(b.y-(p.y+1.15))<1.3){ hurtPlayer(p,1); kill=true; break; }
+      const ch=p.crouch, cy=p.y+(ch?.52:1.15), hh=ch?.58:1.3;
+      if(Math.abs(b.x-p.x)<(ch?.85:.75) && Math.abs(b.y-cy)<hh){ hurtPlayer(p,1); kill=true; break; }
     }
     if(kill) W.eb.splice(i,1);
   }
@@ -953,16 +954,30 @@ function poly(pts,fill,line){
 function drawTrooper(p){
   const body=p.pid===0?"#2f6ea8":"#a83545", trim=p.pid===0?"#7fc8ff":"#ff8f9b";
   if(p.inv>0 && Math.floor(W.t*20)%2===0) return;
-  const sq=p.crouch?.66:1, swing=Math.abs(p.vx)>1&&p.grounded?Math.sin(p.anim*2.6)*.55:0;
+  if(p.crouch){                                   // prone: flat profile, gun forward
+    inWorld(p.x,p.y,p.facing,()=>{
+      box(-1.42,.06,.86,.34,"#1e2836");           // trailing legs
+      box(-1.06,.30,.62,.30,"#26323f");
+      box(-.72,.20,1.24,.62,body);                // torso along the ground
+      box(-.74,.60,1.28,.22,trim,false);
+      box(-.78,.44,.26,.40,"#1a232f");            // pack
+      box(.42,.34,.56,.52,"#e6d6ba");             // head
+      box(.66,.46,.34,.16,trim,false);
+      box(.36,.06,.34,.26,"#33414f");             // braced forearm
+      box(.60,.42,1.26,.20,"#33414f");            // barrel
+      box(1.82,.38,.16,.28,"#1a232f",false);
+    });
+    return;
+  }
+  const swing=Math.abs(p.vx)>1&&p.grounded?Math.sin(p.anim*2.6)*.55:0;
   inWorld(p.x,p.y,p.facing,()=>{
-    ctx.scale(1,sq);
     box(-.44+swing*.5,0,.34,1.02,"#1e2836");
     box(.10-swing*.5,0,.34,1.02,"#26323f");
     box(-.52,.92,1.04,1.18,body);
     box(-.54,1.24,1.08,.3,trim,false);
     box(-.40,2.08,.66,.58,"#e6d6ba");
     box(-.06,2.20,.42,.2,trim,false);
-    box(-.66,1.18,.22,.72,"#1a232f");              // pack
+    box(-.66,1.18,.22,.72,"#1a232f");
     const a=Math.atan2(p.ay,p.ax*p.facing);
     ctx.save();
     ctx.translate(.06,1.62); ctx.rotate(a);
@@ -1097,7 +1112,7 @@ function syncView(dt){
   for(const p of W.players){
     if(p.dead||p.out) continue;
     if(p._cd!=null && p.cd>p._cd+.001)
-      spark(p.x+p.ax*1.35,p.y+(p.crouch?.75:1.62)+p.ay*.6,3,"#ffe6a8",5);
+      spark(p.x+p.ax*(p.crouch?1.6:1.35),p.y+(p.crouch?.58:1.62)+p.ay*.6,3,"#ffe6a8",5);
     p._cd=p.cd;
   }
   updateBackdrop(dt);
@@ -1307,6 +1322,7 @@ function playerMove(p,inp,dt,isClient){
     if(ax===0&&ay===0){ ax=p.facing; }
     p.ax=ax; p.ay=ay;
   } else { p.ax=p.facing; p.ay=0; }
+  if(p.crouch){ p.ax=p.facing; p.ay=0; }   // prone: always fire straight ahead
   const wantX = p.crouch?0:(Math.abs(sx)>.28?clamp(sx*1.6,-1,1):0);
   p.vx = lerp(p.vx, wantX*T.run, p.grounded?.42:.19);
   if(Math.abs(p.vx)<.45) p.vx=0;
