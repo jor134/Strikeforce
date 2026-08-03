@@ -212,6 +212,7 @@ const T = {
   grav:-82, run:15.5, jump:30.5, coyote:.10, jumpBuf:.12,
   pw:.46, ph:2.35,
   hpMax:3, lives:3, invuln:1.6, respawn:1.8,
+  bossMeters:300,            /* metres travelled that summon the field boss */
   viewW:42, viewH:23,
   segW:30, segs:13, arenaW:50,
   snapHz:16, inputHz:24
@@ -237,6 +238,11 @@ function buildLevel(seed){
   const B=(x0,x1,top,h,oneWay)=>blocks.push({
     x:(x0+x1)/2, y:top-h/2, w:(x1-x0)/2, h:h/2, oneWay:!!oneWay});
   const spawn=(type,sx,sy,extra)=>spawns.push(Object.assign({id:++id,type,x:sx,y:sy,live:false},extra||{}));
+  /* surface height of whatever has been generated so far, -99 over a pit */
+  const topAt=x=>{ let best=-99;
+    for(const b of blocks){ if(b.oneWay) continue; const t=b.y+b.h;
+      if(Math.abs(x-b.x)<b.w && t<=14 && t>best) best=t; }
+    return best; };
 
   B(-14,T.segW,0,9,false);
   x=T.segW;
@@ -283,7 +289,14 @@ function buildLevel(seed){
       spawn("nest",x0+15,8.9);
       spawn("grunt",x0+5,0);
     }
-    if(r()<.28) spawn("crate",x0+T.segW*.5,0,{drop:r()<.4?"H":(r()<.5?"S":"M")});
+    /* a medical cache in most segments, plus the usual weapon crates */
+    if(r()<.72){
+      for(let tries=0;tries<6;tries++){
+        const hx=x0+4+r()*(T.segW-8), hy=topAt(hx);
+        if(hy>-90){ spawn("crate",hx,hy,{drop:"H"}); break; }
+      }
+    }
+    if(r()<.34) spawn("crate",x0+T.segW*.5,0,{drop:r()<.5?"S":"M"});
     x=x1;
   }
   const aStart=x, aEnd=x+T.arenaW;
@@ -565,7 +578,8 @@ function resetWorld(seed,nPlayers){
   LV=buildLevel(seed);
   for(const s of LV.spawns){s.live=false;s.done=false;}
   W={lv:LV,players:[],enemies:[],pb:[],eb:[],pu:[],boss:null,
-     camX:T.viewW/2-10,t:0,score:0,phase:"run",eid:1,puid:1,shake:0,over:0};
+     camX:T.viewW/2-10,t:0,score:0,phase:"run",eid:1,puid:1,shake:0,over:0,
+     dist:0,fieldBossDone:false,bossPending:false,pendT:0};
   for(let i=0;i<nPlayers;i++) W.players.push(newPlayer(i));
   buildBackdrop(LV);
 }
@@ -626,6 +640,26 @@ function safeSpawnX(x){
   }
   return best==null?clamp(x,lo,hi):best;
 }
+function groundTopAt(x){
+  let best=-99;
+  for(const b of LV.blocks){
+    if(b.oneWay) continue;
+    const top=b.y+b.h;
+    if(Math.abs(x-b.x)<b.w && top<=14 && top>best) best=top;
+  }
+  return best;
+}
+/* the field boss walks the terrain, so all it needs is mostly-solid footing
+   for the players and no cliff inside the locked arena */
+function bossArenaOk(cx){
+  let prev=null,n=0,solid=0;
+  for(let x=cx-12;x<=cx+14;x+=2){
+    const g=groundTopAt(x); n++;
+    if(g>-90){ solid++; if(prev!=null&&Math.abs(g-prev)>4.2) return false; prev=g; }
+    else prev=null;
+  }
+  return solid/n>=.85;
+}
 function nearestPlayer(x,y){
   let best=null,bd=1e9;
   for(const p of W.players){ if(p.dead||p.out) continue;
@@ -661,8 +695,9 @@ function killEnemy(e){
   W.score += e.type==="grunt"?100:e.type==="runner"?150:e.type==="drone"?200:
              e.type==="turret"?250:e.type==="nest"?500:0;
   if(e.type==="crate"&&e.drop) dropPickup(e.drop,e.x,e.y+1.2);
-  else if((e.type==="nest"||e.type==="turret")&&Math.random()<.34)
-    dropPickup(Math.random()<.3?"H":(Math.random()<.5?"S":"M"),e.x,e.y+1.5);
+  else if((e.type==="nest"||e.type==="turret")&&Math.random()<.46)
+    dropPickup(Math.random()<.55?"H":(Math.random()<.5?"S":"M"),e.x,e.y+1.5);
+  else if(e.type==="drone"&&Math.random()<.14) dropPickup("H",e.x,e.y);
 }
 function dropPickup(type,x,y){ W.pu.push({id:W.puid++,type,x,y,vy:6,landed:false}); }
 
@@ -689,13 +724,24 @@ function stepWorld(dt,inputs){
   /* camera */
   let lead=W.camX;
   for(const p of W.players) if(!p.dead&&!p.out) lead=Math.max(lead,p.x);
+  W.dist=Math.max(W.dist,lead);
+  if(W.dist>=T.bossMeters && !W.fieldBossDone){ W.fieldBossDone=true; W.bossPending=true; }
   if(W.boss){
-    const lock=LV.arena+T.arenaW/2;
-    W.camX=lerp(W.camX,lock,1-Math.pow(.05,dt));
+    W.camX=lerp(W.camX,W.boss.lock,1-Math.pow(.05,dt));
+    W.boss.deadT=W.boss.dead?(W.boss.deadT||0)+dt:0;
+    if(W.boss.dead && W.boss.field && W.boss.deadT>1.5){ W.boss=null; W.phase="run"; }
   } else {
     const target=clamp(lead, half-10, Math.min(LV.arena+T.arenaW-half, LV.end-half));
     W.camX=Math.max(W.camX, lerp(W.camX,target,1-Math.pow(.0025,dt)));
-    if(W.camX>LV.arena-half+T.arenaW*.40) startBoss();
+    if(W.camX>LV.arena-half+T.arenaW*.40) startBoss(false);
+    else if(W.bossPending){
+      W.pendT+=dt;
+      if(bossArenaOk(W.camX) || W.pendT>5){
+        W.bossPending=false;
+        const gy=groundTopAt(W.camX+12);
+        startBoss(true, gy>-90?gy:0);
+      }
+    }
   }
 
   /* spawn activation */
@@ -781,17 +827,21 @@ function updateEnemies(dt){
   }
 }
 
-function startBoss(){
+function startBoss(field,groundY){
   W.phase="boss";
   const n=W.players.filter(p=>!p.out).length||1;
-  const hp=115+55*(n-1);
-  W.boss={x:LV.arena+38,y:0,vx:0,hp:hp,max:hp,t:0,fire:1.6,miss:3.2,
-    state:0,facing:-1,dash:0,dead:false};
+  const hp = field ? 80+38*(n-1) : 115+55*(n-1);
+  const lock = field ? W.camX : LV.arena+T.arenaW/2;
+  W.boss={x: field?lock+13:LV.arena+38, y: field?groundY:0, vx:0, hp, max:hp, t:0,
+    fire:1.6, miss:3.2, state:0, facing:-1, dash:0, dead:false, deadT:0,
+    field:!!field, lock, lo:lock-11, hi:lock+14};
 }
 function updateBoss(dt){
-  const b=W.boss; b.t+=dt; b.fire-=dt; b.miss-=dt;
+  const b=W.boss;
+  if(b.dead) return;
+  b.t+=dt; b.fire-=dt; b.miss-=dt;
   const tgt=nearestPlayer(b.x,b.y);
-  const lo=LV.arena+16, hi=LV.arena+T.arenaW-8;
+  const lo=b.field?b.lo:LV.arena+16, hi=b.field?b.hi:LV.arena+T.arenaW-8;
   const ph = b.hp>b.max*.6?1 : b.hp>b.max*.28?2:3;
   b.state=ph;
   if(b.dash>0){
@@ -800,6 +850,10 @@ function updateBoss(dt){
   } else {
     b.vx = Math.sin(b.t*.5)*(ph===3?9:5.5);
     b.x=clamp(b.x+b.vx*dt,lo,hi);
+  }
+  if(b.field){
+    const g=groundTopAt(b.x);
+    if(g>-90) b.y=lerp(b.y,g,1-Math.pow(.004,dt));
   }
   if(tgt) b.facing = tgt.x<b.x?-1:1;
   if(b.fire<=0 && tgt){
@@ -816,7 +870,7 @@ function updateBoss(dt){
     b.miss = ph===3?2.0:3.0;
   }
   if(ph===3 && b.dash<=0 && Math.random()<dt*.35){ b.dash=1.5; b.vx=b.facing*17; }
-  if(tgt && Math.abs(tgt.x-b.x)<3.4 && tgt.y<7) hurtPlayer(tgt,1);
+  if(!b.dead && tgt && Math.abs(tgt.x-b.x)<3.4 && tgt.y<7) hurtPlayer(tgt,1);
 }
 
 function updateBullets(dt){
@@ -843,7 +897,11 @@ function updateBullets(dt){
       const bo=W.boss;
       if(Math.abs(b.x-bo.x)<3.5 && b.y>bo.y+0.9 && b.y<bo.y+8.2){
         bo.hp-=b.dmg; bo.flash=.1;
-        if(bo.hp<=0){ bo.dead=true; W.score+=5000; W.phase="win"; W.over=W.t; W.shake=1.2; }
+        if(bo.hp<=0){
+          bo.dead=true; bo.deadT=0; W.shake=1.2;
+          if(bo.field){ W.score+=2500; dropPickup("H",bo.x,bo.y+2); }
+          else { W.score+=5000; W.phase="win"; W.over=W.t; }
+        }
         if(b.pierce>0) b.pierce--; else kill=true;
       }
     }
@@ -1259,7 +1317,7 @@ async function rtcJoin(code){
 
 /* ---------- snapshot / restore ---------- */
 function snapshot(){
-  return {t:"s",c:r2(W.camX),s:W.score,ph:W.phase,
+  return {t:"s",c:r2(W.camX),s:W.score,ph:W.phase,d:r1(W.dist),
     p:W.players.map(p=>[p.pid,r2(p.x),r2(p.y),r1(p.vx),r1(p.vy),p.facing,r1(p.hp),p.lives,p.wep,
       p.dead?1:0,r1(p.ax),r1(p.ay),p.grounded?1:0,p.inv>0?1:0,p.out?1:0,p.crouch?1:0]),
     e:W.enemies.map(e=>[e.eid,e.type,r2(e.x),r2(e.y),r1(e.vx),r1(e.vy),e.facing,r1(e.hp),
@@ -1267,11 +1325,11 @@ function snapshot(){
     b:W.pb.map(b=>[r2(b.x),r2(b.y),r1(b.vx),r1(b.vy),b.k]),
     x:W.eb.map(b=>[r2(b.x),r2(b.y),r1(b.vx),r1(b.vy),b.k]),
     u:W.pu.map(u=>[u.id,u.type,r2(u.x),r2(u.y),u.landed?1:0]),
-    z:W.boss?[r2(W.boss.x),r2(W.boss.y),r1(W.boss.hp),W.boss.state,W.boss.facing,r1(W.boss.vx),W.boss.dead?1:0,W.boss.max]:0};
+    z:W.boss?[r2(W.boss.x),r2(W.boss.y),r1(W.boss.hp),W.boss.state,W.boss.facing,r1(W.boss.vx),W.boss.dead?1:0,W.boss.max,W.boss.field?1:0]:0};
 }
 function applySnap(s){
   if(!W) return;
-  W.camX=s.c; W.score=s.s; W.phase=s.ph;
+  W.camX=s.c; W.score=s.s; W.phase=s.ph; W.dist=s.d||0;
   for(const a of s.p){
     let p=W.players.find(x=>x.pid===a[0]);
     if(!p){ p=newPlayer(a[0]); W.players.push(p); }
@@ -1293,7 +1351,7 @@ function applySnap(s){
   W.pb=s.b.map(a=>({x:a[0],y:a[1],vx:a[2],vy:a[3],k:a[4]}));
   W.eb=s.x.map(a=>({x:a[0],y:a[1],vx:a[2],vy:a[3],k:a[4]}));
   W.pu=s.u.map(a=>({id:a[0],type:a[1],x:a[2],y:a[3],landed:!!a[4]}));
-  if(s.z){ W.boss={x:s.z[0],y:s.z[1],hp:s.z[2],max:s.z[7]||170,state:s.z[3],facing:s.z[4],vx:s.z[5],dead:!!s.z[6]}; }
+  if(s.z){ W.boss={x:s.z[0],y:s.z[1],hp:s.z[2],max:s.z[7]||170,state:s.z[3],facing:s.z[4],vx:s.z[5],dead:!!s.z[6],field:!!s.z[8]}; }
   else W.boss=null;
 }
 function clientStep(dt,inp){
@@ -1374,8 +1432,11 @@ function updateHUD(){
     $("wepA").textContent=WEP[p0.wep].name; }
   if(p1){ $("hpB").textContent=p1.out?"OUT":heart(p1.hp,p1.lives);
     $("wepB").textContent=WEP[p1.wep].name; }
-  $("score").textContent=String(W.score).padStart(6,"0");
-  if(W.phase==="boss"&&!GAME.bossSeen){ GAME.bossSeen=true; banner("Warmachine",1800); }
+  $("score").textContent=String(W.score).padStart(6,"0")+
+    "  \u00b7  "+Math.max(0,Math.round(W.dist))+"m";
+  if(W.boss&&!W.boss.dead){
+    if(!GAME.bossSeen){ GAME.bossSeen=true; banner(W.boss.field?"Heavy inbound":"Warmachine",1800); }
+  } else GAME.bossSeen=false;
   if(W.boss&&!W.boss.dead){
     $("bossbar").style.display="block";
     $("bossbar").firstElementChild.style.width=clamp(W.boss.hp/W.boss.max*100,0,100)+"%";
