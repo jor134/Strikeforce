@@ -597,7 +597,15 @@ function moveBody(e,dt,hw,hh,dropThrough,stepAssist){
       const top=b.y+b.h, rise=top-e.y;
       if(stepAssist && e.grounded && e.vy<=0 && rise>0 && rise<=0.95){ e.y=top; continue; }
       const pen=(hw+b.w)-Math.abs(e.x-b.x);
-      e.x+=(e.x<b.x?-1:1)*pen; e.vx=0;
+      /* a penetration deeper than the body is not a side graze -- the body is
+         buried in the block. Ejecting sideways would fling it the whole width
+         of the block, so climb out of the top instead. */
+      if(pen>hw*2){
+        if(top-e.y<=hh*2){ e.y=top; if(e.vy<0) e.vy=0; e.grounded=true; }
+        continue;
+      }
+      /* settle just clear of the face, never a hair inside it */
+      e.x=b.x+(e.x<b.x?-1:1)*((hw+b.w)+.002); e.vx=0;
     }
   }
   /* vertical: gather every candidate first, then apply one resolution, so a
@@ -616,11 +624,26 @@ function moveBody(e,dt,hw,hh,dropThrough,stepAssist){
     }
     if(Math.abs(e.y+hh-b.y)<hh+b.h){
       if(e.vy<=0 && py>=top-0.35){ hasLand=true; if(top>landY) landY=top; }
-      else if(e.vy>0){ hasCeil=true; const c=b.y-b.h-H; if(c<ceilY) ceilY=c; }
+      /* only bonk a head on a block the body was genuinely underneath. Without
+         this, grazing a wall while rising teleports the body below the block. */
+      else if(e.vy>0 && py+H<=b.y-b.h+0.30){ hasCeil=true; const c=b.y-b.h-H; if(c<ceilY) ceilY=c; }
     }
   }
   if(hasLand){ e.y=landY; e.vy=0; e.grounded=true; }
   else if(hasCeil){ e.y=ceilY; e.vy=0; }
+}
+/* the screen edge can push a body into geometry it never walked into.
+   Lift it onto the obstacle if that is reachable, otherwise hold it at the face. */
+function unstick(p){
+  const hw=T.pw, H=T.ph;
+  for(const b of LV.blocks){
+    if(b.oneWay) continue;
+    const lo=p.y+.10, hi=p.y+H-.10, top=b.y+b.h;
+    if(Math.abs(p.x-b.x)<hw+b.w && lo<top && hi>b.y-b.h){
+      if(top-p.y<=H*.92){ p.y=top; if(p.vy<0) p.vy=0; p.grounded=true; }
+      else p.x=b.x-(hw+b.w)-.002;
+    }
+  }
 }
 function solidAt(x,y){
   for(const b of LV.blocks){ if(b.oneWay) continue;
@@ -1393,7 +1416,9 @@ function playerMove(p,inp,dt,isClient){
   }
   if(!inp.jump && p.vy>9) p.vy-=T.jump*1.7*dt;
   moveBody(p,dt,T.pw,T.ph/2,p.drop>0,true);
+  const bx=p.x;
   p.x=clamp(p.x, W.camX-half+.9, Math.min(W.camX+half-.9, LV.end-1));
+  if(p.x!==bx) unstick(p);
   if(!isClient){
     if(p.y<-18){ p.hp=0; p.dead=true; p.rt=T.respawn; p.lives--; if(p.lives<0) p.out=true; W.shake=.5; }
     if(inp.fire && p.cd<=0){ firePlayer(p); p.cd=WEP[p.wep].rate; }
